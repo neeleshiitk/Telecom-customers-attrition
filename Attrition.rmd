@@ -1,0 +1,289 @@
+---
+title: "Logistic Regression - Attrition"
+output: html_document
+---
+
+
+```{r results='asis', echo=TRUE, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning=FALSE)
+#data wrangling
+library("readxl")
+library("MASS")
+library("car")
+library("dplyr")
+library("Hmisc")
+library("caret")
+library("sqldf")
+library("FSelector")
+library("knitr")
+library(ROCR)
+library(pROC)
+library(caret)
+library(gmodels)
+
+```
+
+
+
+```{r, echo=TRUE}
+
+dataset <-  read.csv("~\\R\\Attrion\\Proactive Attrition Management-Logistic Regression Case Study.csv", header=T)
+str(dataset)
+summary(dataset)
+
+#  ---------------------------------------------------------------------------- # 
+#Create user defined function for descriptive analysis
+var_Summ=function(x){
+  if(class(x)=="numeric"){
+    Var_Type=class(x)
+    n<-length(x)
+    nmiss<-sum(is.na(x))
+    mean<-mean(x,na.rm=T)
+    std<-sd(x,na.rm=T)
+    var<-var(x,na.rm=T)
+    min<-min(x,na.rm=T)
+    p1<-quantile(x,0.01,na.rm=T)
+    p5<-quantile(x,0.05,na.rm=T)
+    p10<-quantile(x,0.1,na.rm=T)
+    q1<-quantile(x,0.25,na.rm=T)
+    q2<-quantile(x,0.5,na.rm=T)
+    q3<-quantile(x,0.75,na.rm=T)
+    p90<-quantile(x,0.9,na.rm=T)
+    p95<-quantile(x,0.95,na.rm=T)
+    p99<-quantile(x,0.99,na.rm=T)
+    max<-max(x,na.rm=T)
+    UC1=mean(x,na.rm=T)+3*sd(x,na.rm=T)
+    LC1=mean(x,na.rm=T)-3*sd(x,na.rm=T)
+    UC2=quantile(x,0.99,na.rm=T)
+    LC2=quantile(x,0.01,na.rm=T)
+    iqr=IQR(x,na.rm=T)
+    UC3=q3+1.5*iqr
+    LC3=q1-1.5*iqr
+    ot1<-max>UC1 | min<LC1 
+    ot2<-max>UC2 | min<LC2 
+    ot3<-max>UC3 | min<LC3
+    return(c(Var_Type=Var_Type, n=n,nmiss=nmiss,mean=mean,std=std,var=var,min=min,
+             p1=p1,p5=p5,p10=p10,q1=q1,q2=q2,q3=q3,p90=p90,p95=p95,p99=p99,max=max,
+             ot_m1=ot1,ot_m2=ot2,ot_m2=ot3))
+  }
+  else{
+    Var_Type=class(x)
+    n<-length(x)
+    nmiss<-sum(is.na(x))
+    fre<-table(x)
+    prop<-prop.table(table(x))
+    #x[is.na(x)]<-x[which.max(prop.table(table(x)))]
+    
+    return(c(Var_Type=Var_Type, n=n,nmiss=nmiss,freq=fre,proportion=prop))
+  }
+}
+#Vector of numaerical variables
+num_var= sapply(dataset,is.numeric)
+cat_var= !sapply(dataset,is.numeric)
+
+#Applying above defined function on numerical variables
+my_num_data<-t(data.frame(apply(dataset[num_var], 2, var_Summ)))
+my_cat_data<-data.frame(t(apply(dataset[cat_var], 2, var_Summ)))
+
+#Missing Value Treatment
+dataset[,num_var] <- apply(data.frame(dataset[,num_var]), 2, function(x){x <- replace(x, is.na(x), mean(x, na.rm=TRUE))})
+dataset[,cat_var] <- apply(data.frame(dataset[,cat_var]), 2, function(x){x <- replace(x, is.na(x), which.max(prop.table(table(x))))})
+#  ---------------------------------------------------------------------------- # 
+
+# Outlier setting function, Capping @ 95 and 1 percentile
+M1_fun <- function(x){
+  quantiles <- quantile( x, c(.01, .95 ),na.rm=TRUE )
+  x[ x < quantiles[1] ] <- quantiles[1]
+  x[ x > quantiles[2] ] <- quantiles[2]
+  x
+}
+dataset[num_var] <- apply(data.frame(dataset[num_var]), 2, function(x) M1_fun(x))
+```
+
+```{r echo=TRUE, results='hide'}
+# Selecting manually as R has not selected these variables as factors
+  
+
+# variables with categories 
+factvar <- c("CHURN","MONTHS","UNIQSUBS","ACTVSUBS","PHONES","MODELS","AGE1","AGE2","CHILDREN",
+             "CREDITA","CREDITAA","CREDITB","CREDITC","CREDITDE","CREDITGY","CREDITZ","PRIZMRUR",
+             "PRIZMUB","PRIZMTWN","REFURB","WEBCAP","TRUCK","RV","OCCPROF","OCCCLER","OCCCRFT",
+             "OCCSTUD","OCCHMKR","OCCRET","OCCSELF","OWNRENT","MARRYUN","MARRYYES","MARRYNO",
+             "MAILORD","MAILRES","MAILFLAG","TRAVEL","PCOWN","CREDITCD","RETCALLS","RETACCPT",
+             "NEWCELLY","NEWCELLN","REFER","INCMISS","INCOME","MCYCLE","CREDITAD","SETPRCM","RETCALL")  
+#  ---------------------------------------------------------------------------- #
+
+dataset[factvar] <- lapply(dataset[factvar], as.factor)     # Conversion to factor to work unilogit function
+#factssss <- sapply(dataset, is.factor) 
+
+#  ---------------------------------------------------------------------------- #
+# Factor with only 1 level
+factonly1level <- c("CREDITGY","CREDITZ", "PRIZMRUR", "OCCCLER","OCCCRFT",
+                    "OCCSTUD","OCCHMKR","OCCRET","OCCSELF", "MAILFLAG","RETCALLS","RETACCPT",
+                    "REFER","MCYCLE","CREDITAD","RETCALL") 
+
+factvar2 <- factvar[!factvar %in% factonly1level]   # removing factor variable with only 1 level
+# --------------------------------------------------------------------------------------------------- #
+
+numvar2 <- sapply(dataset, is.numeric)              # Getting Numeric Variable after conversion to Factor Variable       
+
+training <- subset(dataset,dataset$CALIBRAT==1)
+testing <- subset(dataset,dataset$CALIBRAT==0)
+
+numvar2 <- names(training[numvar2])                # getting names of column from dataset on the basis TRUE and FALSE
+numvar2 <- numvar2[!numvar2 %in% c("CALIBRAT","CHURNDEP")]   # numvar2 -> varibales with numeric class
+# --------------------------------------------------------------------------------------------------- #
+
+impvar <- c(numvar2, factvar2)                      # variables with numeric and factor to work unilogit fucntion  
+```
+
+
+```{r, echo=TRUE}
+#Create Logistic Regression Function for bivariate analysis
+unilogit = function(df,depvar) {
+  depvar1 = deparse(substitute(depvar))                       
+  lapply(names(df)[which(names(df)!= depvar1)], function(x)
+  {mylogit = glm(formula(paste(depvar1,"~",x)), data = df, family = "binomial")
+  summary(mylogit)$coefficient}
+  )
+}
+
+univariate = unilogit(training[impvar], CHURN)
+```
+
+
+```{r, echo=TRUE, message=FALSE, warning=FALSE}
+#Merge all the coefficients
+final <- do.call(rbind, univariate) 
+
+#Make the table formatable by adding row names as variable names in a column
+univList = cbind(data.frame(Variable = row.names(final)),final)
+```
+
+```{r, echo=TRUE, message=FALSE, warning=FALSE}
+FinalList = subset(univList, Variable!="(Intercept)")     # Removing Intercept of every logistic regression
+FinalList[,"Wald ChiSquare"] = FinalList[4]^2
+FinalList[,"Rank"] = rank(-FinalList[6])
+FinalList = FinalList[order(FinalList$Rank),]
+# write.csv(FinalList,"WaldChiSq.csv")
+```
+
+```{r, echo=TRUE, results='hide'}
+# Selection of Variables from Wald Chi-Square Test 
+impvar2 <- c("EQPDAYS","RECCHRGE","WEBCAP","CREDITDE","MOU","MONTHS","PEAKVCE","INCALLS",
+             "CUSTCARE","OPEAKVCE","CHANGEM","CUSTOMER","MOUREC","OUTCALLS","MODELS","UNANSVCE","SETPRCM",
+             "PHONES","CALLWAIT","UNIQSUBS","THREEWAY","REFURB","OVERAGE","MAILRES","SETPRC","MAILORD",
+             "AGE1","MARRYUN","CREDITA","CREDITC","DIRECTAS","INCMISS","CREDITB","DROPBLK","ROAM","CREDITAA",
+             "MARRYNO","OWNRENT","ACTVSUBS","REVENUE","DROPVCE","INCOME","BLCKVCE", "AGE2")
+
+trainformula <- as.formula(paste("CHURN",paste(impvar2,collapse = "+"),sep="~"))
+
+# Model - Logistic Regression
+fit <- glm(trainformula,
+           data=training,family = binomial(logit))
+summary(fit)  
+
+#Checking for concordance 
+source("C:\\Users\\ss\\Documents\\R\\Attrion\\Concordance.R")
+Concordance(fit)     # Concordance = 0.6553, 0.61985
+```
+
+```{r, echo=TRUE, message=FALSE, warning=FALSE}
+# Removing insignificant variables from Model1 of Regression
+impvar3 <- impvar2[!impvar2 %in% c("CUSTCARE", "OPEAKVCE", "MOUREC", "OUTCALLS", "UNANSVCE", "DIRECTAS")]
+```
+
+**Second Model after removing insignificant variables**  
+
+```{r, echo=TRUE, message=FALSE, warning=FALSE}
+trainformula2 <- as.formula(paste("CHURN",paste(impvar3,collapse = "+"),sep="~"))
+
+fit2 <- glm(trainformula2,
+            data=training,family = binomial(logit))
+summary(fit2)
+
+source("C:\\Users\\ss\\Documents\\R\\Attrion\\Concordance.R")
+Concordance(fit2)  # Concordance = 0.65545 0.62045
+
+step(fit2)
+
+```
+
+**Decile Analysis**  
+
+
+```{r, echo=TRUE}
+train1<- cbind(training, Prob=predict(fit2, type="response")) 
+
+##Creating Deciles
+decLocations <- quantile(train1$Prob, probs = seq(0.1,0.9,by=0.1))
+train1$decile <- findInterval(train1$Prob,c(-Inf,decLocations, Inf))
+
+require(sqldf)
+fit_train_DA <- sqldf("select decile, min(Prob) as Min_prob
+                      , max(Prob) as max_prob
+                      , sum(churn) as BAD
+                      , (count(decile)-sum(churn)) as GOOD 
+                      from train1
+                      group by decile
+                      order by decile desc")
+kable(fit_train_DA, digits=2)
+```
+
+**MEAN ABSOLUTE ERROR**  
+
+```{r, echo=TRUE}
+##Testing dataset
+test1<- cbind(testing, Prob=predict(fit2,testing, type="response")) 
+# Error in model.frame.default(Terms, newdata, na.action = na.action, xlev = object$xlevels) : 
+# factor MODELS has new levels 1.56179095234074
+
+# Removing model extra level
+levels(testing$MODELS)
+levels(testing$MODELS)[levels(testing$MODELS)=="1.56179095234074"] <- "2"
+levels(testing$PHONES)[levels(testing$PHONES)=="1.80861695239704"] <- "2"
+
+##Creating Deciles
+t2_decLocations <- quantile(test1$Prob, probs = seq(0.1,0.9,by=0.1), na.rm=T)
+test1$decile <- findInterval(test1$Prob,c(-Inf,t2_decLocations, Inf))
+names(test1)
+#Decile Analysis Reports
+require(sqldf)
+
+fit_test_DA <- sqldf("select decile, min(Prob) as Min_prob
+                     , max(Prob) as max_prob
+                     , sum(churn) as BAD
+                     , (count(decile)-sum(churn)) as GOOD 
+                     from test1
+                     group by decile
+                     order by decile desc")
+kable(fit_test_DA, digits=2)
+```
+
+**VALIDATION**  
+
+```{r, echo=TRUE, kable}
+train1$predicted <- ifelse(train1$Prob>0.47,1,0)  # Prob>0.47 selected by Deciles analysis
+table(train1$predicted,train1$CHURN)  # comparing predicted and actual churn
+mean(train1$predicted == train1$CHURN)  # Accuracy Percentage   = 60.95%
+
+#  ---------------------------------------------------------------------------- #
+
+test1$predicted <- ifelse(test1$Prob>=0.47,1,0)
+
+table(test1$predicted,test1$CHURN)   # comparing predicted and actual churn
+mean(test1$predicted == test1$CHURN) # Accuracy Percentage   = 49.57%
+
+
+roc.curve(train1$CHURN, train1$Prob, plotit = T)   # Area under the curve (AUC): 0.652
+roc.curve(test1$CHURN, test1$Prob, plotit = T)     # Area under the curve (AUC): 0.639
+```
+
+
+
+
+
+
+
+
+
